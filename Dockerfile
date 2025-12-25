@@ -82,9 +82,5 @@ RUN chmod -R 755 /app/venv/lib/python*/site-packages/playwright_captcha/utils/ca
 # Expose ports
 EXPOSE 8000 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
-
 # Run the application
 CMD ["python3", "server.py"]

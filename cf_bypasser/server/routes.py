@@ -468,6 +468,3 @@ def setup_routes(app: FastAPI):
             "running": global_proxy_server.running,
             "port": global_proxy_server.port
         }
-        except Exception as e:
-            logger.error(f"Error getting cache stats: {e}")
-            raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")

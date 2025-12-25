@@ -1,19 +1,46 @@
-FROM ubuntu:rolling
+# Stage 1: Builder - Install dependencies and fetch Camoufox
+FROM ubuntu:rolling AS builder
 
-# Set environment variables to avoid interactive prompts during build
 ENV DEBIAN_FRONTEND=noninteractive
-# Install system dependencies for Chrome and Python packages
-USER root
-RUN apt-get update && apt-get install -y \
-    software-properties-common \
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     wget \
-    gnupg \
+    curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+WORKDIR /app
+
+# Create virtual environment and install Python dependencies
+COPY server_requirements.txt .
+RUN python3 -m venv /app/venv && \
+    /app/venv/bin/pip install --upgrade pip && \
+    /app/venv/bin/pip install --no-cache-dir -r server_requirements.txt
+
+# Fetch Camoufox browser
+RUN /app/venv/bin/camoufox fetch
+
+# Stage 2: Runtime - Minimal runtime image
+FROM ubuntu:rolling
+
+# Metadata
+LABEL maintainer="CloudflareBypassForScraping"
+LABEL description="Cloudflare Bypasser with HTTP Proxy Server"
+LABEL version="2.0.0"
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PATH="/app/venv/bin:$PATH"
+
+# Install only runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3 \
     curl \
     xvfb \
     libgtk-3-0 \
-    libgtk-3-dev \
     libxss1 \
     libxtst6 \
     libxrandr2 \
@@ -32,42 +59,32 @@ RUN apt-get update && apt-get install -y \
     libxi6 \
     fonts-liberation \
     libnss3 \
-    lsb-release \
-    && rm -rf /var/lib/apt/lists/*
-
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 WORKDIR /app
-COPY . .
-# Copy requirements.txt and install dependencies
-COPY requirements.txt .
 
-# Change ownership of app directory to ubuntu first
+# Copy virtual environment from builder
+COPY --from=builder /app/venv /app/venv
+
+# Copy application code
+COPY . .
+
+# Change ownership to ubuntu user
 RUN chown -R ubuntu:ubuntu /app
 
-# Switch to ubuntu user to create venv and install packages
+# Switch to ubuntu user
 USER ubuntu
 
-# Create and activate virtual environment as ubuntu user
-RUN python3 -m venv /app/venv
-ENV PATH="/app/venv/bin:$PATH"
+# Fix permissions for playwright_captcha addon directory
+RUN chmod -R 755 /app/venv/lib/python*/site-packages/playwright_captcha/utils/camoufox_add_init_script/addon/ 2>/dev/null || true
 
-# Install pip and requirements in virtual environment
-RUN pip install --upgrade pip
-RUN pip install --no-cache-dir -r server_requirements.txt
+# Expose ports
+EXPOSE 8000 8080
 
-# Fetch Camoufox as ubuntu user
-RUN camoufox fetch
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
 
-# Switch back to root for remaining setup
-USER root
-WORKDIR /app
-
-
-# Fix permissions for playwright_captcha addon directory (needs write access at runtime)
-RUN chmod -R 777 /app/venv/lib/python*/site-packages/playwright_captcha/utils/camoufox_add_init_script/addon/ || true
-
-# Switch to ubuntu user for runtime
-USER ubuntu
-
-# RUN the application
+# Run the application
 CMD ["python3", "server.py"]

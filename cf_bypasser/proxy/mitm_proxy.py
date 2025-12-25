@@ -29,10 +29,9 @@ class MITMProxyServer:
         self.bypasser = bypasser or CamoufoxBypasser(log=True)
         self.cert_manager = CertificateManager()
         self.server = None
-        
+        self.running = False
+
         logger.info(f"MITM Proxy initialized on {host}:{port}")
-        logger.info(f"⚠️  CA Certificate: {self.cert_manager.get_ca_certificate_path()}")
-        logger.info(f"⚠️  Install this certificate in your browser to enable MITM")
     
     async def start(self):
         """Start the MITM proxy server."""
@@ -41,16 +40,19 @@ class MITMProxyServer:
             self.host,
             self.port
         )
-        
+
+        self.running = True
         logger.info(f"🚀 MITM Proxy server started on {self.host}:{self.port}")
         logger.info(f"📜 CA Certificate: {self.cert_manager.get_ca_certificate_path()}")
-        
+        logger.info(f"⚠️  Install this certificate in your browser to enable HTTPS interception")
+
         async with self.server:
             await self.server.serve_forever()
     
     async def stop(self):
         """Stop the MITM proxy server."""
         if self.server:
+            self.running = False
             self.server.close()
             await self.server.wait_closed()
         logger.info("MITM Proxy server stopped")
@@ -130,10 +132,15 @@ class MITMProxyServer:
             cert_pem, key_pem = self.cert_manager.generate_domain_certificate(target_host)
 
             # Create SSL context for client connection
+            from cryptography.hazmat.primitives import serialization
+
+            ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+
+            # Load certificate and key from memory using a temporary file approach
+            # (Python's ssl module requires file paths, so we still need temp files)
             import tempfile
             import os
 
-            # Save cert and key to temp files
             with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pem') as cert_file:
                 cert_file.write(cert_pem)
                 cert_path = cert_file.name
@@ -142,7 +149,6 @@ class MITMProxyServer:
                 key_path = key_file.name
 
             try:
-                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
                 ssl_context.load_cert_chain(cert_path, key_path)
                 ssl_context.check_hostname = False
                 ssl_context.verify_mode = ssl.CERT_NONE
@@ -208,22 +214,9 @@ class MITMProxyServer:
 
             method, path, version = parts[0], parts[1], parts[2]
 
-            # Read headers
-            headers = {}
-            while True:
-                line = await ssl_reader.readline()
-                if not line or line == b'\r\n':
-                    break
-                line = line.decode('utf-8', errors='ignore').strip()
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    headers[key.strip().lower()] = value.strip()
-
-            # Read body if present
-            body = b''
-            if 'content-length' in headers:
-                content_length = int(headers['content-length'])
-                body = await ssl_reader.read(content_length)
+            # Read headers and body
+            headers = await self.read_headers(ssl_reader)
+            body = await self.read_body(ssl_reader, headers)
 
             # Construct full URL
             scheme = 'https' if target_port == 443 else 'http'
@@ -231,36 +224,12 @@ class MITMProxyServer:
 
             logger.info(f"🌐 Proxying {method} {url}")
 
-            # Get CF cookies
+            # Get CF cookies and user agent
             target_url = f"{scheme}://{target_host}/"
-            cf_data = await self.bypasser.get_or_generate_cookies(target_url)
-
-            if not cf_data:
-                logger.warning(f"Failed to get CF cookies for {target_host}")
-                cf_cookies = {}
-                user_agent = headers.get('user-agent', 'Mozilla/5.0')
-            else:
-                cf_cookies = cf_data['cookies']
-                user_agent = cf_data['user_agent']
-                logger.info(f"✅ Using CF cookies: {list(cf_cookies.keys())}")
+            cf_cookies, user_agent = await self.get_cf_data(target_url, headers)
 
             # Prepare request headers
-            request_headers = {
-                'User-Agent': user_agent,
-                'Accept': headers.get('accept', '*/*'),
-                'Accept-Language': headers.get('accept-language', 'en-US,en;q=0.9'),
-            }
-
-            # Merge cookies
-            existing_cookies = headers.get('cookie', '')
-            merged_cookies = self.merge_cookies(existing_cookies, cf_cookies)
-            if merged_cookies:
-                request_headers['Cookie'] = merged_cookies
-
-            # Add other headers
-            for key, value in headers.items():
-                if key not in ['host', 'connection', 'proxy-connection', 'cookie', 'user-agent']:
-                    request_headers[key.title()] = value
+            request_headers = self.prepare_request_headers(headers, user_agent, cf_cookies)
 
             # Make request using curl_cffi
             from curl_cffi.requests import AsyncSession
@@ -275,21 +244,7 @@ class MITMProxyServer:
                 )
 
                 # Send response back through SSL connection
-                status_line = f"HTTP/1.1 {response.status_code} {response.reason}\r\n"
-                ssl_writer.write(status_line.encode())
-
-                # Send response headers
-                for key, value in response.headers.items():
-                    if key.lower() not in ['transfer-encoding', 'connection']:
-                        ssl_writer.write(f"{key}: {value}\r\n".encode())
-
-                ssl_writer.write(b"Connection: close\r\n")
-                ssl_writer.write(b"\r\n")
-
-                # Send response body
-                ssl_writer.write(response.content)
-                await ssl_writer.drain()
-
+                await self.send_response(ssl_writer, response)
                 logger.info(f"✅ Response sent: {response.status_code} for {url}")
 
         except Exception as e:
@@ -317,55 +272,18 @@ class MITMProxyServer:
             if parsed.query:
                 path += f'?{parsed.query}'
 
-            # Read request headers
-            headers = {}
-            while True:
-                line = await client_reader.readline()
-                if not line or line == b'\r\n':
-                    break
-                line = line.decode('utf-8', errors='ignore').strip()
-                if ':' in line:
-                    key, value = line.split(':', 1)
-                    headers[key.strip().lower()] = value.strip()
-
-            # Read request body if present
-            body = b''
-            if 'content-length' in headers:
-                content_length = int(headers['content-length'])
-                body = await client_reader.read(content_length)
+            # Read headers and body
+            headers = await self.read_headers(client_reader)
+            body = await self.read_body(client_reader, headers)
 
             logger.info(f"🌐 Proxying {method} {url}")
 
-            # Get or generate Cloudflare cookies
+            # Get CF cookies and user agent
             target_url = f"{parsed.scheme}://{hostname}/"
-            cf_data = await self.bypasser.get_or_generate_cookies(target_url)
-
-            if not cf_data:
-                logger.warning(f"Failed to get CF cookies for {hostname}")
-                cf_cookies = {}
-                user_agent = headers.get('user-agent', 'Mozilla/5.0')
-            else:
-                cf_cookies = cf_data['cookies']
-                user_agent = cf_data['user_agent']
-                logger.info(f"✅ Using CF cookies: {list(cf_cookies.keys())}")
+            cf_cookies, user_agent = await self.get_cf_data(target_url, headers)
 
             # Prepare request headers
-            request_headers = {
-                'User-Agent': user_agent,
-                'Accept': headers.get('accept', '*/*'),
-                'Accept-Language': headers.get('accept-language', 'en-US,en;q=0.9'),
-            }
-
-            # Merge cookies
-            existing_cookies = headers.get('cookie', '')
-            merged_cookies = self.merge_cookies(existing_cookies, cf_cookies)
-            if merged_cookies:
-                request_headers['Cookie'] = merged_cookies
-
-            # Add other headers
-            for key, value in headers.items():
-                if key not in ['host', 'connection', 'proxy-connection', 'cookie', 'user-agent']:
-                    request_headers[key.title()] = value
+            request_headers = self.prepare_request_headers(headers, user_agent, cf_cookies)
 
             # Make request using curl_cffi
             from curl_cffi.requests import AsyncSession
@@ -380,26 +298,83 @@ class MITMProxyServer:
                 )
 
                 # Send response to client
-                status_line = f"HTTP/1.1 {response.status_code} {response.reason}\r\n"
-                client_writer.write(status_line.encode())
-
-                # Send response headers
-                for key, value in response.headers.items():
-                    if key.lower() not in ['transfer-encoding', 'connection']:
-                        client_writer.write(f"{key}: {value}\r\n".encode())
-
-                client_writer.write(b"Connection: close\r\n")
-                client_writer.write(b"\r\n")
-
-                # Send response body
-                client_writer.write(response.content)
-                await client_writer.drain()
-
+                await self.send_response(client_writer, response)
                 logger.info(f"✅ Response sent: {response.status_code} for {url}")
 
         except Exception as e:
             logger.error(f"Error handling HTTP request: {e}", exc_info=True)
             await self.send_error(client_writer, 502, "Bad Gateway")
+
+    async def read_headers(self, reader: asyncio.StreamReader) -> dict:
+        """Read HTTP headers from stream."""
+        headers = {}
+        while True:
+            line = await reader.readline()
+            if not line or line == b'\r\n':
+                break
+            line = line.decode('utf-8', errors='ignore').strip()
+            if ':' in line:
+                key, value = line.split(':', 1)
+                headers[key.strip().lower()] = value.strip()
+        return headers
+
+    async def read_body(self, reader: asyncio.StreamReader, headers: dict) -> bytes:
+        """Read HTTP body from stream based on Content-Length header."""
+        body = b''
+        if 'content-length' in headers:
+            content_length = int(headers['content-length'])
+            body = await reader.read(content_length)
+        return body
+
+    async def get_cf_data(self, target_url: str, headers: dict) -> tuple:
+        """Get Cloudflare cookies and user agent for target URL."""
+        cf_data = await self.bypasser.get_or_generate_cookies(target_url)
+
+        if not cf_data:
+            hostname = urlparse(target_url).netloc
+            logger.warning(f"Failed to get CF cookies for {hostname}")
+            return {}, headers.get('user-agent', 'Mozilla/5.0')
+
+        logger.info(f"✅ Using CF cookies: {list(cf_data['cookies'].keys())}")
+        return cf_data['cookies'], cf_data['user_agent']
+
+    def prepare_request_headers(self, headers: dict, user_agent: str, cf_cookies: dict) -> dict:
+        """Prepare request headers with CF cookies merged."""
+        request_headers = {
+            'User-Agent': user_agent,
+            'Accept': headers.get('accept', '*/*'),
+            'Accept-Language': headers.get('accept-language', 'en-US,en;q=0.9'),
+        }
+
+        # Merge cookies
+        existing_cookies = headers.get('cookie', '')
+        merged_cookies = self.merge_cookies(existing_cookies, cf_cookies)
+        if merged_cookies:
+            request_headers['Cookie'] = merged_cookies
+
+        # Add other headers
+        for key, value in headers.items():
+            if key not in ['host', 'connection', 'proxy-connection', 'cookie', 'user-agent']:
+                request_headers[key.title()] = value
+
+        return request_headers
+
+    async def send_response(self, writer: asyncio.StreamWriter, response) -> None:
+        """Send HTTP response to client."""
+        status_line = f"HTTP/1.1 {response.status_code} {response.reason}\r\n"
+        writer.write(status_line.encode())
+
+        # Send response headers
+        for key, value in response.headers.items():
+            if key.lower() not in ['transfer-encoding', 'connection']:
+                writer.write(f"{key}: {value}\r\n".encode())
+
+        writer.write(b"Connection: close\r\n")
+        writer.write(b"\r\n")
+
+        # Send response body
+        writer.write(response.content)
+        await writer.drain()
 
     def merge_cookies(self, existing: str, new_cookies: dict) -> str:
         """Merge existing cookies with new CF cookies."""

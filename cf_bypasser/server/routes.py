@@ -19,42 +19,72 @@ from cf_bypasser.server.models import (
 # Global instances
 global_bypasser = None
 global_mirror = None
+global_proxy_server = None
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI, enable_proxy: bool = True, proxy_port: int = 8080) -> AsyncGenerator[None, None]:
     """
     Lifespan context manager for FastAPI application startup and shutdown.
     """
-    global global_bypasser, global_mirror
-    
+    global global_bypasser, global_mirror, global_proxy_server
+
     # Startup
     logger.info("Starting Cloudflare Bypasser Server...")
-    
+
     # Initialize bypasser with cache
     global_bypasser = CamoufoxBypasser(max_retries=5, log=True)
-    
+
     # Initialize request mirror
     global_mirror = RequestMirror(global_bypasser)
-    
+
+    # Initialize and start proxy server if enabled
+    if enable_proxy:
+        try:
+            from cf_bypasser.proxy import ProxyServer
+            import asyncio
+
+            logger.info(f"Starting HTTP proxy server on port {proxy_port}...")
+            global_proxy_server = ProxyServer(
+                host="0.0.0.0",
+                port=proxy_port,
+                bypasser=global_bypasser
+            )
+
+            # Start proxy server in background
+            asyncio.create_task(global_proxy_server.start())
+
+            # Give it a moment to start
+            await asyncio.sleep(0.5)
+
+            logger.info(f"✅ HTTP proxy server started on 0.0.0.0:{proxy_port}")
+
+        except Exception as e:
+            logger.error(f"Failed to start proxy server: {e}")
+            global_proxy_server = None
+
     logger.info("Server initialization complete")
-    
+
     yield
-    
+
     # Shutdown
     logger.info("Shutting down Cloudflare Bypasser Server...")
-    
+
     try:
+        if global_proxy_server:
+            logger.info("Stopping HTTP proxy server...")
+            await global_proxy_server.stop()
+
         if global_mirror:
             await global_mirror.cleanup()
-        
+
         if global_bypasser:
             await global_bypasser.cleanup()
     except Exception as e:
         logger.error(f"Error during shutdown: {e}")
-    
+
     logger.info("Server shutdown complete")
 
 
@@ -420,6 +450,24 @@ def setup_routes(app: FastAPI):
                 total_hostnames=len(cache),
                 hostnames=list(cache.keys())
             )
+
+        except Exception as e:
+            logger.error(f"Error getting cache stats: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")
+
+    # Proxy server status endpoint (read-only)
+    @app.get("/proxy/status")
+    async def proxy_status():
+        """Get the current status of the HTTP proxy server."""
+        global global_proxy_server
+
+        if not global_proxy_server:
+            return {"running": False}
+
+        return {
+            "running": global_proxy_server.running,
+            "port": global_proxy_server.port
+        }
         except Exception as e:
             logger.error(f"Error getting cache stats: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get cache stats: {str(e)}")

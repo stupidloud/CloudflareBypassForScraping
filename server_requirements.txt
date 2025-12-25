@@ -6,3 +6,4 @@ pyvirtualdisplay
 playwright-captcha
 camoufox[geoip]
 curl_cffi
+cryptography>=41.0.0

@@ -27,7 +27,7 @@ def create_app(enable_proxy: bool = True, proxy_port: int = 8080) -> FastAPI:
 
     app = FastAPI(
         title="Cloudflare Bypasser",
-        description="Firefox-only Camoufox-based Cloudflare bypasser with request mirroring and HTTP proxy",
+        description="Firefox-only Camoufox-based Cloudflare bypasser with request mirroring and MITM proxy",
         version="2.0.0",
         lifespan=app_lifespan
     )

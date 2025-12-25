@@ -40,14 +40,14 @@ async def lifespan(app: FastAPI, enable_proxy: bool = True, proxy_port: int = 80
     # Initialize request mirror
     global_mirror = RequestMirror(global_bypasser)
 
-    # Initialize and start proxy server if enabled
+    # Initialize and start MITM proxy server if enabled
     if enable_proxy:
         try:
-            from cf_bypasser.proxy import ProxyServer
+            from cf_bypasser.proxy import MITMProxyServer
             import asyncio
 
-            logger.info(f"Starting HTTP proxy server on port {proxy_port}...")
-            global_proxy_server = ProxyServer(
+            logger.info(f"Starting MITM proxy server on port {proxy_port}...")
+            global_proxy_server = MITMProxyServer(
                 host="0.0.0.0",
                 port=proxy_port,
                 bypasser=global_bypasser
@@ -59,10 +59,12 @@ async def lifespan(app: FastAPI, enable_proxy: bool = True, proxy_port: int = 80
             # Give it a moment to start
             await asyncio.sleep(0.5)
 
-            logger.info(f"✅ HTTP proxy server started on 0.0.0.0:{proxy_port}")
+            logger.info(f"✅ MITM proxy server started on 0.0.0.0:{proxy_port}")
+            logger.info(f"📜 CA Certificate: {global_proxy_server.cert_manager.get_ca_certificate_path()}")
+            logger.info(f"⚠️  Install CA certificate in your browser to enable HTTPS interception")
 
         except Exception as e:
-            logger.error(f"Failed to start proxy server: {e}")
+            logger.error(f"Failed to start MITM proxy server: {e}")
             global_proxy_server = None
 
     logger.info("Server initialization complete")
@@ -74,7 +76,7 @@ async def lifespan(app: FastAPI, enable_proxy: bool = True, proxy_port: int = 80
 
     try:
         if global_proxy_server:
-            logger.info("Stopping HTTP proxy server...")
+            logger.info("Stopping MITM proxy server...")
             await global_proxy_server.stop()
 
         if global_mirror:

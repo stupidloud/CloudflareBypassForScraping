@@ -35,29 +35,38 @@ RUN apt-get update && apt-get install -y \
     lsb-release \
     && rm -rf /var/lib/apt/lists/*
 
+
 WORKDIR /app
+COPY . .
+# Copy requirements.txt and install dependencies
+COPY requirements.txt .
 
-# Copy only requirements first to leverage Docker cache
-COPY server_requirements.txt .
+# Change ownership of app directory to ubuntu first
+RUN chown -R ubuntu:ubuntu /app
 
-# Create venv and install dependencies as root to avoid permission issues during install, 
-# then we will fix ownership later.
+# Switch to ubuntu user to create venv and install packages
+USER ubuntu
+
+# Create and activate virtual environment as ubuntu user
 RUN python3 -m venv /app/venv
 ENV PATH="/app/venv/bin:$PATH"
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r server_requirements.txt
 
-# Copy the rest of the application
-COPY . .
+# Install pip and requirements in virtual environment
+RUN pip install --upgrade pip
+RUN pip install --no-cache-dir -r server_requirements.txt
 
-# Fetch Camoufox
+# Fetch Camoufox as ubuntu user
 RUN camoufox fetch
 
-# Fix permissions: change ownership to ubuntu user and set specific permissions
-RUN chown -R ubuntu:ubuntu /app && \
-    chmod -R 777 /app/venv/lib/python*/site-packages/playwright_captcha/utils/camoufox_add_init_script/addon/ || true
+# Switch back to root for remaining setup
+USER root
+WORKDIR /app
 
-# Switch to non-root user for runtime
+
+# Fix permissions for playwright_captcha addon directory (needs write access at runtime)
+RUN chmod -R 777 /app/venv/lib/python*/site-packages/playwright_captcha/utils/camoufox_add_init_script/addon/ || true
+
+# Switch to ubuntu user for runtime
 USER ubuntu
 
 # RUN the application

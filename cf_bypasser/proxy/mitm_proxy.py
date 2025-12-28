@@ -30,6 +30,7 @@ class MITMProxyServer:
         self.cert_manager = CertificateManager()
         self.server = None
         self.running = False
+        self.session_cache = {}  # Cache curl_cffi sessions per hostname+proxy
 
         logger.info(f"MITM Proxy initialized on {host}:{port}")
     
@@ -55,7 +56,52 @@ class MITMProxyServer:
             self.running = False
             self.server.close()
             await self.server.wait_closed()
+
+        # Close all cached sessions
+        await self.cleanup_sessions()
+
         logger.info("MITM Proxy server stopped")
+
+    async def get_session(self, hostname: str, proxy: Optional[str] = None):
+        """Get or create a curl_cffi session for the hostname with optional proxy.
+
+        Args:
+            hostname: Target hostname
+            proxy: Optional proxy URL (e.g., http://user:pass@host:port)
+
+        Returns:
+            AsyncSession: Configured curl_cffi session
+        """
+        from curl_cffi.requests import AsyncSession
+
+        session_key = f"{hostname}:{proxy or 'no-proxy'}"
+
+        if session_key not in self.session_cache:
+            proxy_dict = None
+            if proxy:
+                # Configure proxy for both HTTP and HTTPS
+                proxy_dict = {"http": proxy, "https": proxy}
+                logger.debug(f"Creating session with proxy: {proxy}")
+
+            session = AsyncSession(
+                impersonate="firefox",
+                proxies=proxy_dict,
+                timeout=30
+            )
+            self.session_cache[session_key] = session
+            logger.debug(f"Created new session for {session_key}")
+
+        return self.session_cache[session_key]
+
+    async def cleanup_sessions(self):
+        """Close all cached sessions."""
+        for session_key, session in self.session_cache.items():
+            try:
+                await session.close()
+                logger.debug(f"Closed session: {session_key}")
+            except Exception as e:
+                logger.warning(f"Error closing session {session_key}: {e}")
+        self.session_cache.clear()
     
     async def handle_client(
         self,
@@ -218,34 +264,41 @@ class MITMProxyServer:
             headers = await self.read_headers(ssl_reader)
             body = await self.read_body(ssl_reader, headers)
 
+            # Extract proxy-specific headers
+            proxy, bypass_cache = self.extract_proxy_headers(headers)
+
             # Construct full URL
             scheme = 'https' if target_port == 443 else 'http'
             url = f"{scheme}://{target_host}{path}"
 
             logger.info(f"🌐 Proxying {method} {url}")
+            if proxy:
+                logger.info(f"🔌 x-proxy header detected: {proxy}")
+            if bypass_cache:
+                logger.info(f"🔄 x-bypass-cache header detected")
 
-            # Get CF cookies and user agent
+            # Get CF cookies and user agent (with proxy and bypass-cache support)
             target_url = f"{scheme}://{target_host}/"
-            cf_cookies, user_agent = await self.get_cf_data(target_url, headers)
+            cf_cookies, user_agent = await self.get_cf_data(target_url, headers, proxy, bypass_cache)
 
-            # Prepare request headers
+            # Prepare request headers (proxy headers will be stripped)
             request_headers = self.prepare_request_headers(headers, user_agent, cf_cookies)
 
-            # Make request using curl_cffi
-            from curl_cffi.requests import AsyncSession
+            # Get session with proxy support (cached)
+            session = await self.get_session(target_host, proxy)
 
-            async with AsyncSession(impersonate="firefox") as session:
-                response = await session.request(
-                    method=method,
-                    url=url,
-                    headers=request_headers,
-                    data=body if body else None,
-                    allow_redirects=False
-                )
+            # Make request using curl_cffi with proxy
+            response = await session.request(
+                method=method,
+                url=url,
+                headers=request_headers,
+                data=body if body else None,
+                allow_redirects=False
+            )
 
-                # Send response back through SSL connection
-                await self.send_response(ssl_writer, response)
-                logger.info(f"✅ Response sent: {response.status_code} for {url}")
+            # Send response back through SSL connection
+            await self.send_response(ssl_writer, response)
+            logger.info(f"✅ Response sent: {response.status_code} for {url}")
 
         except Exception as e:
             logger.error(f"Error handling SSL request: {e}", exc_info=True)
@@ -276,34 +329,68 @@ class MITMProxyServer:
             headers = await self.read_headers(client_reader)
             body = await self.read_body(client_reader, headers)
 
+            # Extract proxy-specific headers
+            proxy, bypass_cache = self.extract_proxy_headers(headers)
+
             logger.info(f"🌐 Proxying {method} {url}")
+            if proxy:
+                logger.info(f"🔌 x-proxy header detected: {proxy}")
+            if bypass_cache:
+                logger.info(f"🔄 x-bypass-cache header detected")
 
-            # Get CF cookies and user agent
+            # Get CF cookies and user agent (with proxy and bypass-cache support)
             target_url = f"{parsed.scheme}://{hostname}/"
-            cf_cookies, user_agent = await self.get_cf_data(target_url, headers)
+            cf_cookies, user_agent = await self.get_cf_data(target_url, headers, proxy, bypass_cache)
 
-            # Prepare request headers
+            # Prepare request headers (proxy headers will be stripped)
             request_headers = self.prepare_request_headers(headers, user_agent, cf_cookies)
 
-            # Make request using curl_cffi
-            from curl_cffi.requests import AsyncSession
+            # Get session with proxy support (cached)
+            session = await self.get_session(hostname, proxy)
 
-            async with AsyncSession(impersonate="firefox") as session:
-                response = await session.request(
-                    method=method,
-                    url=url,
-                    headers=request_headers,
-                    data=body if body else None,
-                    allow_redirects=False
-                )
+            # Make request using curl_cffi with proxy
+            response = await session.request(
+                method=method,
+                url=url,
+                headers=request_headers,
+                data=body if body else None,
+                allow_redirects=False
+            )
 
-                # Send response to client
-                await self.send_response(client_writer, response)
-                logger.info(f"✅ Response sent: {response.status_code} for {url}")
+            # Send response to client
+            await self.send_response(client_writer, response)
+            logger.info(f"✅ Response sent: {response.status_code} for {url}")
 
         except Exception as e:
             logger.error(f"Error handling HTTP request: {e}", exc_info=True)
             await self.send_error(client_writer, 502, "Bad Gateway")
+
+    def extract_proxy_headers(self, headers: dict) -> tuple:
+        """Extract x-proxy and x-bypass-cache from headers.
+
+        Returns:
+            tuple: (proxy, bypass_cache)
+        """
+        proxy = None
+        bypass_cache = False
+
+        for key, value in headers.items():
+            key_lower = key.lower()
+            if key_lower == 'x-proxy':
+                proxy = value
+            elif key_lower == 'x-bypass-cache':
+                bypass_cache = value.lower() in ('true', '1', 'yes', 'on')
+
+        return proxy, bypass_cache
+
+    def strip_proxy_headers(self, headers: dict) -> dict:
+        """Remove x-proxy and x-bypass-cache headers from request."""
+        cleaned_headers = {}
+        for key, value in headers.items():
+            key_lower = key.lower()
+            if key_lower not in ['x-proxy', 'x-bypass-cache']:
+                cleaned_headers[key] = value
+        return cleaned_headers
 
     async def read_headers(self, reader: asyncio.StreamReader) -> dict:
         """Read HTTP headers from stream."""
@@ -326,9 +413,28 @@ class MITMProxyServer:
             body = await reader.read(content_length)
         return body
 
-    async def get_cf_data(self, target_url: str, headers: dict) -> tuple:
-        """Get Cloudflare cookies and user agent for target URL."""
-        cf_data = await self.bypasser.get_or_generate_cookies(target_url)
+    async def get_cf_data(self, target_url: str, headers: dict, proxy: str = None, bypass_cache: bool = False) -> tuple:
+        """Get Cloudflare cookies and user agent for target URL.
+
+        Args:
+            target_url: Target URL to get cookies for
+            headers: Request headers (for fallback user-agent)
+            proxy: Optional proxy URL (e.g., http://user:pass@host:port)
+            bypass_cache: If True, invalidate cached cookies and generate fresh ones
+
+        Returns:
+            tuple: (cf_cookies dict, user_agent string)
+        """
+        # Handle bypass-cache flag
+        if bypass_cache:
+            from cf_bypasser.utils.hash import md5_hash
+            hostname = urlparse(target_url).netloc
+            cache_key = md5_hash(hostname + (proxy or ""))
+            self.bypasser.cookie_cache.invalidate(cache_key)
+            logger.info(f"🔄 x-bypass-cache: Invalidated cache for {hostname}")
+
+        # Get or generate cookies with optional proxy
+        cf_data = await self.bypasser.get_or_generate_cookies(target_url, proxy)
 
         if not cf_data:
             hostname = urlparse(target_url).netloc
@@ -336,24 +442,29 @@ class MITMProxyServer:
             return {}, headers.get('user-agent', 'Mozilla/5.0')
 
         logger.info(f"✅ Using CF cookies: {list(cf_data['cookies'].keys())}")
+        if proxy:
+            logger.info(f"🔌 Using proxy: {proxy}")
         return cf_data['cookies'], cf_data['user_agent']
 
     def prepare_request_headers(self, headers: dict, user_agent: str, cf_cookies: dict) -> dict:
-        """Prepare request headers with CF cookies merged."""
+        """Prepare request headers with CF cookies merged and proxy headers stripped."""
+        # First strip proxy-specific headers
+        clean_headers = self.strip_proxy_headers(headers)
+
         request_headers = {
             'User-Agent': user_agent,
-            'Accept': headers.get('accept', '*/*'),
-            'Accept-Language': headers.get('accept-language', 'en-US,en;q=0.9'),
+            'Accept': clean_headers.get('accept', '*/*'),
+            'Accept-Language': clean_headers.get('accept-language', 'en-US,en;q=0.9'),
         }
 
         # Merge cookies
-        existing_cookies = headers.get('cookie', '')
+        existing_cookies = clean_headers.get('cookie', '')
         merged_cookies = self.merge_cookies(existing_cookies, cf_cookies)
         if merged_cookies:
             request_headers['Cookie'] = merged_cookies
 
-        # Add other headers
-        for key, value in headers.items():
+        # Add other headers (excluding proxy-specific ones)
+        for key, value in clean_headers.items():
             if key not in ['host', 'connection', 'proxy-connection', 'cookie', 'user-agent']:
                 request_headers[key.title()] = value
 

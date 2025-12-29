@@ -201,11 +201,13 @@ class CamoufoxBypasser:
             cookies = await context.cookies()
             cookie_dict = {}
             for cookie in cookies:
-                cookie_dict[cookie['name']] = cookie['value']
-            
+                # Only cache Cloudflare-related cookies
+                if cookie['name'].startswith(('cf_', '__cf', '_cf')):
+                    cookie_dict[cookie['name']] = cookie['value']
+
             # Get user agent from the page
             user_agent = await page.evaluate("navigator.userAgent")
-            
+
             return {
                 "cookies": cookie_dict,
                 "user_agent": user_agent
@@ -220,17 +222,19 @@ class CamoufoxBypasser:
             cookies = await context.cookies()
             cookie_dict = {}
             for cookie in cookies:
-                cookie_dict[cookie['name']] = cookie['value']
-            
+                # Only cache Cloudflare-related cookies
+                if cookie['name'].startswith(('cf_', '__cf', '_cf')):
+                    cookie_dict[cookie['name']] = cookie['value']
+
             # Get user agent from the page
             user_agent = await page.evaluate("navigator.userAgent")
-            
+
             # Get HTML content
             html_content = await page.content()
-            
+
             # Get final URL (in case of redirects)
             final_url = page.url
-            
+
             return {
                 "cookies": cookie_dict,
                 "user_agent": user_agent,

@@ -83,11 +83,15 @@ class MITMProxyServer:
                 proxy_dict = {"http": proxy, "https": proxy}
                 logger.debug(f"Creating session with proxy: {proxy}")
 
+            # Create session without cookie persistence
+            # This ensures the session doesn't automatically manage cookies
             session = AsyncSession(
                 impersonate="firefox",
                 proxies=proxy_dict,
                 timeout=30
             )
+            # Clear any cookies to ensure clean state
+            session.cookies.clear()
             self.session_cache[session_key] = session
             logger.debug(f"Created new session for {session_key}")
 
@@ -287,6 +291,9 @@ class MITMProxyServer:
             # Get session with proxy support (cached)
             session = await self.get_session(target_host, proxy)
 
+            # Clear session cookies before request to prevent automatic cookie management
+            session.cookies.clear()
+
             # Make request using curl_cffi with proxy
             response = await session.request(
                 method=method,
@@ -295,6 +302,9 @@ class MITMProxyServer:
                 data=body if body else None,
                 allow_redirects=False
             )
+
+            # Clear session cookies after request to prevent persistence
+            session.cookies.clear()
 
             # Send response back through SSL connection
             await self.send_response(ssl_writer, response)
@@ -348,6 +358,9 @@ class MITMProxyServer:
             # Get session with proxy support (cached)
             session = await self.get_session(hostname, proxy)
 
+            # Clear session cookies before request to prevent automatic cookie management
+            session.cookies.clear()
+
             # Make request using curl_cffi with proxy
             response = await session.request(
                 method=method,
@@ -356,6 +369,9 @@ class MITMProxyServer:
                 data=body if body else None,
                 allow_redirects=False
             )
+
+            # Clear session cookies after request to prevent persistence
+            session.cookies.clear()
 
             # Send response to client
             await self.send_response(client_writer, response)
@@ -477,7 +493,11 @@ class MITMProxyServer:
 
         # Send response headers
         for key, value in response.headers.items():
-            if key.lower() not in ['transfer-encoding', 'connection']:
+            key_lower = key.lower()
+            if key_lower not in ['transfer-encoding', 'connection']:
+                # For Set-Cookie headers, remove Secure attribute if needed for HTTP connections
+                if key_lower == 'set-cookie':
+                    value = value.replace("; Secure", "").replace("; secure", "")
                 writer.write(f"{key}: {value}\r\n".encode())
 
         writer.write(b"Connection: close\r\n")

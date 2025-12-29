@@ -82,19 +82,23 @@ class RequestMirror:
     async def get_session(self, hostname: str, proxy: Optional[str] = None) -> AsyncSession:
         """Get or create a curl-cffi session for the hostname."""
         session_key = f"{hostname}:{proxy or 'no-proxy'}"
-        
+
         if session_key not in self.session_cache:
             proxy_dict = None
             if proxy:
                 proxy_dict = {"http": proxy, "https": proxy}
-            
+
+            # Create session without cookie persistence
+            # This ensures the session doesn't automatically manage cookies
             session = AsyncSession(
                 impersonate="firefox",  # Use Firefox impersonation
                 proxies=proxy_dict,
                 timeout=30
             )
+            # Clear any cookies to ensure clean state
+            session.cookies.clear()
             self.session_cache[session_key] = session
-        
+
         return self.session_cache[session_key]
     
     async def mirror_request(
@@ -157,7 +161,10 @@ class RequestMirror:
                 
                 # Get session
                 session = await self.get_session(hostname, proxy)
-                
+
+                # Clear session cookies before request to prevent automatic cookie management
+                session.cookies.clear()
+
                 # Make the request
                 response = await session.request(
                     method=method,
@@ -166,7 +173,10 @@ class RequestMirror:
                     data=body,
                     allow_redirects=False  # Let the client handle redirects
                 )
-                
+
+                # Clear session cookies after request to prevent persistence
+                session.cookies.clear()
+
                 # Convert response headers to dict
                 response_headers = dict(response.headers)
                 response_content = response.content
@@ -185,7 +195,7 @@ class RequestMirror:
                     await asyncio.sleep(.5)
                     continue
                 
-                # Process response headers: handle Content-Encoding/Length, keep Set-Cookie and others
+                # Process response headers: fix Content-Encoding and Content-Length
                 final_headers = {}
                 for k, v in response_headers.items():
                     k_lower = k.lower()
@@ -201,7 +211,7 @@ class RequestMirror:
                     else:
                         # Keep all other headers including Set-Cookie
                         final_headers[k] = v
-                
+
                 logging.info(f"Request to {hostname} completed with status {status_code}")
                 return status_code, final_headers, response_content
                 

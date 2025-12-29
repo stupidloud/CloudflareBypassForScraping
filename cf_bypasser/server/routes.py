@@ -381,12 +381,19 @@ def setup_routes(app: FastAPI):
             logger.info(f"Request to {hostname} completed with status {status_code} in {processing_time}ms")
             logger.info(f"Response size: {len(response_content)} bytes")
             
-            # Create response with proper headers
+            # Create response
             response = Response(
                 content=response_content,
-                status_code=status_code,
-                headers=response_headers
+                status_code=status_code
             )
+            
+            # Add headers from mirror_request (list of tuples)
+            # We use append for Set-Cookie to support multiple cookies
+            for k, v in response_headers:
+                if k.lower() == "set-cookie":
+                    response.headers.append(k, v)
+                else:
+                    response.headers[k] = v
             
             # Add custom headers for debugging
             response.headers["x-cf-bypasser-version"] = "2.0.0"

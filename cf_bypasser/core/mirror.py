@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import traceback
 from typing import Dict, Any, Optional, Tuple
 from urllib.parse import urlparse, urljoin
@@ -196,21 +197,34 @@ class RequestMirror:
                     continue
                 
                 # Process response headers: fix Content-Encoding and Content-Length
-                final_headers = {}
-                for k, v in response_headers.items():
+                # We use a list of tuples to support multiple headers with the same name (like Set-Cookie)
+                final_headers = []
+                processed_keys = set()
+
+                for k in response.headers:
                     k_lower = k.lower()
+                    if k_lower in processed_keys:
+                        continue
+                    processed_keys.add(k_lower)
+
                     if k_lower == "content-encoding":
                         # Remove gzip/deflate encoding since we're returning raw content
-                        final_headers[k] = "identity"
+                        final_headers.append((k, "identity"))
                     elif k_lower == "content-length":
                         # Recalculate content length
-                        final_headers[k] = str(len(response.content))
+                        final_headers.append((k, str(len(response.content))))
                     elif k_lower == "set-cookie":
-                        # Remove Secure attribute since we are running on HTTP
-                        final_headers[k] = v.replace("; Secure", "").replace("; secure", "")
+                        # Handle multiple Set-Cookie headers and merged cookies
+                        # Split by comma (with optional space) that is followed by something that looks like a new cookie (key=value)
+                        values = response.headers.getlist('set-cookie') if hasattr(response.headers, 'getlist') else [response.headers[k]]
+                        for val in values:
+                            for cookie_val in re.split(r',(?=\s*[^;]*=)', val):
+                                cookie_val = cookie_val.strip().replace("; Secure", "").replace("; secure", "")
+                                if cookie_val:
+                                    final_headers.append((k, cookie_val))
                     else:
-                        # Keep all other headers including Set-Cookie
-                        final_headers[k] = v
+                        # Keep all other headers
+                        final_headers.append((k, response.headers[k]))
 
                 logging.info(f"Request to {hostname} completed with status {status_code}")
                 return status_code, final_headers, response_content

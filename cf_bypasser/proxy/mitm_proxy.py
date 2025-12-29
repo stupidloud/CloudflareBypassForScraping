@@ -4,6 +4,7 @@ MITM HTTPS Proxy with SSL interception and Cloudflare bypass.
 
 import asyncio
 import logging
+import re
 import ssl
 from typing import Optional
 from urllib.parse import urlparse
@@ -492,13 +493,33 @@ class MITMProxyServer:
         writer.write(status_line.encode())
 
         # Send response headers
-        for key, value in response.headers.items():
+        # We use getlist if available to handle multiple Set-Cookie headers correctly.
+        # curl_cffi merges multiple headers into one string with commas by default.
+        processed_headers = set()
+        for key in response.headers:
             key_lower = key.lower()
-            if key_lower not in ['transfer-encoding', 'connection']:
-                # For Set-Cookie headers, remove Secure attribute if needed for HTTP connections
-                if key_lower == 'set-cookie':
-                    value = value.replace("; Secure", "").replace("; secure", "")
-                writer.write(f"{key}: {value}\r\n".encode())
+            if key_lower in processed_headers:
+                continue
+            processed_headers.add(key_lower)
+
+            if key_lower in ['transfer-encoding', 'connection']:
+                continue
+
+            if key_lower == 'set-cookie':
+                # curl_cffi merges multiple Set-Cookie headers into one string with commas.
+                # We need to split them while avoiding splitting the comma in "Expires=Mon, 01-Jan-2024..."
+                # The most reliable way is to split by comma that is followed by a string containing '=' 
+                # before the next ';' or end of string.
+                values = response.headers.getlist('set-cookie') if hasattr(response.headers, 'getlist') else [response.headers[key]]
+                for val in values:
+                    # Split by comma (with optional space) that is followed by something that looks like a new cookie (key=value)
+                    # but NOT an attribute like expires=...
+                    for cookie_val in re.split(r',(?=\s*[^;]*=)', val):
+                        cookie_val = cookie_val.strip().replace("; Secure", "").replace("; secure", "")
+                        if cookie_val:
+                            writer.write(f"Set-Cookie: {cookie_val}\r\n".encode())
+            else:
+                writer.write(f"{key}: {response.headers[key]}\r\n".encode())
 
         writer.write(b"Connection: close\r\n")
         writer.write(b"\r\n")

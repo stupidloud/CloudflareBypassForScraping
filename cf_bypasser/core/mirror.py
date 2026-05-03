@@ -58,8 +58,8 @@ class RequestMirror:
                         name, value = cookie.split('=', 1)
                         incoming_dict[name.strip()] = value.strip()
             
-            # Merge with CF cookies (CF cookies take priority)
-            merged_cookies = {**incoming_dict, **cf_cookies}
+            # Merge with CF cookies (user cookies take precedence)
+            merged_cookies = {**cf_cookies, **incoming_dict}
             
             # Convert back to cookie string
             cookie_pairs = [f"{name}={value}" for name, value in merged_cookies.items()]
@@ -110,7 +110,7 @@ class RequestMirror:
         headers: Dict[str, str],
         body: bytes = None,
         max_retries: int = 2
-    ) -> Tuple[int, Dict[str, str], bytes]:
+    ) -> Tuple[int, list[tuple[str, str]], bytes]:
         """Mirror the request to the target hostname with CF bypass."""
         
         # Extract hostname, proxy, and bypass cache flag
@@ -125,15 +125,14 @@ class RequestMirror:
                 if bypass_cache:
                     logging.info("x-bypass-cache header detected - forcing fresh cookie generation")
                 
-                # Get or generate Cloudflare cookies
-                target_url = self.build_target_url(hostname, "/")  # Use root for cookie generation
-                
+                target_url = self.build_target_url(hostname, path, query_string)
+
                 # If bypass_cache is True, invalidate existing cache first
                 if bypass_cache:
                     parsed_hostname = urlparse(target_url).netloc
                     cache_key = md5_hash(parsed_hostname + (proxy or ""))
                     self.bypasser.cookie_cache.invalidate(cache_key)
-                
+
                 cf_data = await self.bypasser.get_or_generate_cookies(target_url, proxy)
                 
                 if not cf_data:
@@ -146,9 +145,20 @@ class RequestMirror:
                 clean_headers['user-agent'] = cf_data['user_agent']
                 clean_headers.pop("host", None)
                 
-                # Merge cookies
-                incoming_cookies = clean_headers.get('Cookie', '')
+                # Merge cookies - find Cookie header case-insensitively
+                incoming_cookies = ''
+                cookie_header_key = None
+                for key in clean_headers:
+                    if key.lower() == 'cookie':
+                        incoming_cookies = clean_headers[key]
+                        cookie_header_key = key
+                        break
+
                 merged_cookies = self.merge_cookies(incoming_cookies, cf_data['cookies'])
+
+                # Remove original cookie header (if exists) and set with standard casing
+                if cookie_header_key:
+                    del clean_headers[cookie_header_key]
                 clean_headers['Cookie'] = merged_cookies
                 
                 # Add Firefox-like headers for better impersonation

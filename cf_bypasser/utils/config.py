@@ -4,9 +4,9 @@ from typing import Optional, Dict
 OPERATING_SYSTEMS = ["windows", "macos", "linux"]
 
 SCREEN_RESOLUTIONS = [
-    (1920, 1080), (1920, 1200), (2560, 1440), (1680, 1050),
-    (1600, 900), (1366, 768), (1440, 900), (1536, 864),
-    (2560, 1600), (3840, 2160)
+    (1920, 1080),
+    (1366, 768),
+    (2560, 1440),
 ]
 
 
@@ -124,14 +124,7 @@ class BrowserConfig:
     def _configure_linux(config: Dict, firefox_version: int) -> Dict:
         """Configure Linux-specific browser settings."""
         linux_distros = [
-            "X11; Linux x86_64",
             "X11; Ubuntu; Linux x86_64", 
-            "X11; Fedora; Linux x86_64",
-            "X11; Debian; Linux x86_64",
-            "X11; CentOS; Linux x86_64",
-            "X11; Arch Linux; Linux x86_64",
-            "X11; openSUSE; Linux x86_64",
-            "X11; Manjaro; Linux x86_64",
         ]
         linux_distro = random.choice(linux_distros)
         

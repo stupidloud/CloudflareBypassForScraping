@@ -113,12 +113,14 @@ def setup_routes(app: FastAPI):
         request: Request,
         url: Optional[str] = Query(None, description="Target URL to get cookies for"),
         retries: int = Query(5, ge=1, le=10, description="Number of retry attempts"),
-        proxy: Optional[str] = Query(None, description="Proxy URL (optional)")
+        proxy: Optional[str] = Query(None, description="Proxy URL (optional)"),
+        allCookies: bool = Query(False, description="Return all cookies set by the site, not only Cloudflare cookies (skips cache)")
     ):
         """
         Legacy endpoint for backward compatibility.
         Get Cloudflare clearance cookies for a URL.
-        
+        With allCookies=true, every cookie from the browser session is returned.
+
         If x-hostname header is present, this is treated as a mirror request
         and forwarded to the target site's /cookies path.
         """
@@ -151,13 +153,16 @@ def setup_routes(app: FastAPI):
         
         try:
             start_time = time.time()
-            logger.info(f"Getting cookies for {url} (retries: {retries}, proxy: {'yes' if proxy else 'no'})")
-            
+            logger.info(f"Getting cookies for {url} (retries: {retries}, proxy: {'yes' if proxy else 'no'}, all_cookies: {allCookies})")
+
             # Use the global bypasser or create a new one
             bypasser = global_bypasser or CamoufoxBypasser(max_retries=retries, log=True)
-            
+
             # Get cookies using the cache system
-            data = await bypasser.get_or_generate_cookies(url, proxy)
+            if allCookies:
+                data = await bypasser.get_or_generate_cookies(url, proxy, all_cookies=True)
+            else:
+                data = await bypasser.get_or_generate_cookies(url, proxy)
             
             if not data:
                 raise HTTPException(status_code=500, detail="Failed to bypass Cloudflare protection")

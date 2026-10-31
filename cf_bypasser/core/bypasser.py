@@ -223,8 +223,10 @@ class CamoufoxBypasser:
         """Get cookies and user agent after successful bypass."""
         try:
             cookies = await context.cookies()
+            all_cookie_dict = {}
             cookie_dict = {}
             for cookie in cookies:
+                all_cookie_dict[cookie['name']] = cookie['value']
                 # Only cache Cloudflare-related cookies
                 if cookie['name'].startswith(('cf_', '__cf', '_cf')):
                     cookie_dict[cookie['name']] = cookie['value']
@@ -233,7 +235,8 @@ class CamoufoxBypasser:
             user_agent = await page.evaluate("navigator.userAgent")
 
             return {
-                "cookies": cookie_dict,
+                "cookies": cookie_dict,  # Cloudflare cookies only (cached, used by mirror)
+                "all_cookies": all_cookie_dict,  # Every cookie in the browser context
                 "user_agent": user_agent
             }
         except Exception as e:
@@ -270,13 +273,25 @@ class CamoufoxBypasser:
             self.log_message(f"Error getting HTML content and cookies: {e}")
             return None
 
-    async def get_or_generate_cookies(self, url: str, proxy: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Get cached cookies or generate new ones."""
+    async def get_or_generate_cookies(
+        self,
+        url: str,
+        proxy: Optional[str] = None,
+        all_cookies: bool = False
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get cached cookies or generate new ones.
+
+        By default only Cloudflare cookies are returned. With all_cookies=True the
+        cache is skipped (it only holds Cloudflare cookies) and every cookie from the
+        browser session is returned under "cookies". Cloudflare cookies are still
+        written to the cache so the mirror can reuse them.
+        """
         hostname = urlparse(url).netloc
         cache_key = md5_hash(hostname + (proxy or ""))
-        
-        # Try to get cached cookies first
-        cached = self.cookie_cache.get(cache_key)
+
+        # Try to get cached cookies first (cache only holds Cloudflare cookies)
+        cached = None if all_cookies else self.cookie_cache.get(cache_key)
         if cached:
             return {
                 "cookies": cached.cookies,
@@ -298,12 +313,15 @@ class CamoufoxBypasser:
             if await self.solve_cloudflare_challenge(url, page):
                 data = await self.get_cookies_and_user_agent(context, page)
                 if data:
-                    # Cache the new cookies
+                    # Cache the new Cloudflare cookies
                     self.cookie_cache.set(cache_key, data["cookies"], data["user_agent"])
-                    return data
-            
+                    return {
+                        "cookies": data["all_cookies"] if all_cookies else data["cookies"],
+                        "user_agent": data["user_agent"]
+                    }
+
             return None
-            
+
         except Exception as e:
             self.log_message(f"Error in get_or_generate_cookies: {e}")
             return None

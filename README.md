@@ -125,6 +125,12 @@ $ curl "http://localhost:8000/cookies?url=https://nopecha.com/demo/cloudflare"
 }
 ```
 
+By default only Cloudflare cookies (`cf_*`, `__cf*`, `_cf*`) are returned. Add `allCookies=true` to get every cookie the site set during the bypass. This always launches a fresh browser session, because the cache only stores Cloudflare cookies.
+
+```bash
+$ curl "http://localhost:8000/cookies?url=https://nopecha.com/demo/cloudflare&allCookies=true"
+```
+
 ### HTML Content Extraction
 
 The `/html` endpoint returns the full HTML content of a page after bypassing Cloudflare protection. The HTML is returned directly (not as JSON).

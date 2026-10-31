@@ -62,7 +62,22 @@ class TestCookiesEndpoint:
         assert "user_agent" in data, "Response should contain 'user_agent'"
         assert data["cookies"]["cf_clearance"] == "test_token_123"
         assert "Mozilla" in data["user_agent"]
-    
+        mock_bypasser.get_or_generate_cookies.assert_awaited_once_with("https://example.com", None)
+
+    def test_cookies_all_cookies_param(self, client, mock_bypasser):
+        """Test that allCookies=true requests every cookie from the bypasser."""
+        response = client.get(
+            "/cookies",
+            params={"url": "https://example.com", "allCookies": "true"}
+        )
+
+        assert response.status_code == 200, f"Expected 200, got {response.status_code}"
+        data = response.json()
+        assert data["cookies"]["session"] == "abc"
+        mock_bypasser.get_or_generate_cookies.assert_awaited_once_with(
+            "https://example.com", None, all_cookies=True
+        )
+
     def test_cookies_mirror_with_x_hostname(self, client, mock_mirror):
         """Test that /cookies forwards to mirror handler when x-hostname IS present."""
         response = client.get(
